@@ -1,0 +1,15 @@
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-community>=0.3.0
+
+# Embeddings + in-memory vector store
+langchain-huggingface>=0.2.0
+sentence-transformers>=3.0.0
+faiss-cpu>=1.8.0
+
+# Groq inference (reads GROQ_API_KEY from the environment)
+# Pin <1.0 to stay compatible with langchain-core 0.3.x
+langchain-groq>=0.2.0,<1.0.0
+
+# Load secrets from .env
+python-dotenv>=1.0.0

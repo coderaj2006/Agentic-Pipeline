@@ -1,0 +1,72 @@
+# ==========================================
+# 1. Python Environment & Core
+# ==========================================
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Distribution / Packaging
+doc/_build/
+dist/
+build/
+eggs/
+.eggs/
+*.egg-info/
+*.egg
+
+# ==========================================
+# 2. Environment Variables & Secrets (CRITICAL)
+# ==========================================
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# ==========================================
+# 3. Vector Databases & Local Stores
+# ==========================================
+# Local vector database files or directories (Chroma, FAISS, etc.)
+.chroma/
+chroma_db/
+faiss_index/
+*.index
+*.pkl
+*.pickle
+
+# Cache directories for HuggingFace / downloaders
+.cache/
+.huggingface/
+
+# ==========================================
+# 4. Cursor / VS Code / IDE Settings
+# ==========================================
+.vscode/
+.cursor/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+
+# ==========================================
+# 5. OS & Log Files
+# ==========================================
+# Logs
+*.log
+logs/
+.log/
+
+# System Files
+.DS_Store
+Thumbs.db
