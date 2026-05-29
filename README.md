@@ -1,8 +1,8 @@
 # Stateful Multi-Agent RAG & Automation Pipeline
 
-A production-grade, stateful multi-agent automation pipeline implemented across two distinct orchestration paradigms — **LangGraph** and **Google ADK**. The system accepts a natural language business query, retrieves grounded facts from an internal knowledge base, generates a polished executive report, and delivers it via email — all driven by a sequential three-agent architecture.
+A production-grade, stateful multi-agent automation pipeline implemented across two distinct orchestration paradigms — **LangGraph** and **Google ADK** — alongside a standalone deterministic financial analytics tool for cash runway forecasting. The system accepts a natural language business query, retrieves grounded facts from an internal knowledge base, generates a polished executive report, and delivers it via email — all driven by a sequential three-agent architecture.
 
-Both implementations share identical underlying utilities (FAISS vector store, Groq LLM calls, SMTP helper) and produce the same output. The repository serves as a direct, side-by-side comparison of how LangGraph and Google ADK approach the same multi-agent problem.
+Both agent implementations share identical underlying utilities (FAISS vector store, Groq LLM calls, SMTP helper) and produce the same output. The repository serves as a direct, side-by-side comparison of how LangGraph and Google ADK approach the same multi-agent problem, with a separate, LLM-free statistical module for financial forecasting.
 
 ---
 
@@ -13,6 +13,7 @@ Both implementations share identical underlying utilities (FAISS vector store, G
 - [Tech Stack](#tech-stack)
 - [Prerequisites & Installation](#prerequisites--installation)
 - [Environment Configuration](#environment-configuration)
+- [Financial Analytics & Forecasting](#financial-analytics--forecasting)
 - [How to Run](#how-to-run)
 - [Expected Terminal Output](#expected-terminal-output)
 - [Project Structure](#project-structure)
@@ -207,17 +208,20 @@ venv\Scripts\activate
 # macOS / Linux
 source venv/bin/activate
 
-# 3. Install core dependencies (required for both pipelines)
+# 3. Install core dependencies (required for both agent pipelines)
 pip install -r requirements.txt
 
 # 4. Install additional dependencies for the Google ADK pipeline only
 pip install google-adk litellm
+
+# 5. Install dependencies for the cash forecasting tool only
+pip install numpy pandas matplotlib scikit-learn
 ```
 
 ### Full dependency list
 
 ```
-# Core LangChain stack (both pipelines)
+# Core LangChain stack (both agent pipelines)
 langchain>=0.3.0
 langchain-core>=0.3.0
 langchain-community>=0.3.0
@@ -233,6 +237,12 @@ langgraph
 # Google ADK pipeline (step2_google_adk.py)
 google-adk
 litellm
+
+# Cash runway forecasting (cash_forecasting.py) — no API key required
+numpy
+pandas
+matplotlib
+scikit-learn
 ```
 
 > On first run, `sentence-transformers` downloads `all-MiniLM-L6-v2` (~90 MB) and caches it locally. Subsequent runs use the cache.
@@ -253,7 +263,8 @@ cp .env_example .env
 # ===========================================================================
 # GROQ API CONFIGURATION
 # ===========================================================================
-# Required for all LLM inference across both pipelines.
+# Required for all LLM inference across both agent pipelines.
+# Not required for cash_forecasting.py — that script uses no LLM.
 GROQ_API_KEY=your_groq_api_key_here
 
 # ===========================================================================
@@ -265,7 +276,7 @@ GROQ_API_KEY=your_groq_api_key_here
 # GROQ_API_KEY_3=your_third_key_here
 
 # ===========================================================================
-# SMTP EMAIL CONFIGURATION (both pipelines)
+# SMTP EMAIL CONFIGURATION (both agent pipelines)
 # ===========================================================================
 # Required for live email delivery. If any value is missing or the connection
 # fails, the SMTP fail-safe activates automatically — see section below.
@@ -284,7 +295,7 @@ SENDER_PASSWORD=your_app_password_here
 
 | Variable | Required | Description |
 |---|---|---|
-| `GROQ_API_KEY` | **Yes** | Primary Groq API key from [console.groq.com](https://console.groq.com) |
+| `GROQ_API_KEY` | **Yes** (agent pipelines) | Primary Groq API key from [console.groq.com](https://console.groq.com) |
 | `GROQ_API_KEY_2` … `_9` | No | Additional keys for rate-limit rotation (ADK pipeline) |
 | `SMTP_SERVER` | No | Outgoing mail server (e.g. `smtp.gmail.com`) |
 | `SMTP_PORT` | No | SMTP port — defaults to `587` (STARTTLS) |
@@ -292,9 +303,11 @@ SENDER_PASSWORD=your_app_password_here
 | `SENDER_PASSWORD` | No | App password — for Gmail, generate at [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords) with 2FA enabled |
 | `RECIPIENT_EMAIL` | No | Override the To address; falls back to `SENDER_EMAIL` |
 
+> `cash_forecasting.py` requires **no environment variables** — it is fully self-contained and runs without any API keys or credentials.
+
 ### SMTP Fail-Safe
 
-Both pipelines include a robust `send_email()` utility that wraps the entire SMTP handshake in a `try/except`. If credentials are missing, the server is unreachable, or authentication fails for any reason, the function catches the exception and prints a formatted console preview instead of crashing:
+Both agent pipelines include a robust `send_email()` utility that wraps the entire SMTP handshake in a `try/except`. If credentials are missing, the server is unreachable, or authentication fails for any reason, the function catches the exception and prints a formatted console preview instead of crashing:
 
 ```
 +==============================================================+
@@ -327,6 +340,144 @@ To enable rotation, uncomment and populate `GROQ_API_KEY_2`, `GROQ_API_KEY_3`, e
 
 ---
 
+## Financial Analytics & Forecasting
+
+### Overview — `cash_forecasting.py`
+
+A deterministic, LLM-free statistical tool that predicts a startup's cash runway based on historical spending patterns. It is completely decoupled from the agent pipeline files — no shared imports, state, or side effects. Because it uses pure mathematical regression rather than language model inference, its projections are fully reproducible and auditable.
+
+```
+  HISTORICAL CASH DATA (6 months)
+  Aug 2024 → Jan 2025
+       |
+       v
++----------------------------------------------------------------------+
+|  BURN DECOMPOSITION                                                  |
+|                                                                      |
+|  Fixed overhead:    $47,000 / month                                  |
+|  (salaries, rent, SaaS subscriptions)                                |
+|                                                                      |
+|  Variable costs:    $11,000 – $16,400 / month                        |
+|  (cloud compute, marketing, contractor hours)                        |
+|                                                                      |
+|  One-off anomalies: $0 – $22,000 / month                             |
+|  (legal fees, equipment purchases, travel)                           |
++----------------------------------------------------------------------+
+       |
+       v
++----------------------------------------------------------------------+
+|  LINEAR REGRESSION MODEL (scikit-learn)                              |
+|                                                                      |
+|  Feature X:  integer month index [0, 1, 2, 3, 4, 5]                 |
+|  Target  y:  cash balance at each month-end                          |
+|                                                                      |
+|  Fitted slope:      -$43,277 / month                                 |
+|  Fitted intercept:  $447,510                                         |
+|  R² score:          0.9942  (near-perfect linear fit)                |
++----------------------------------------------------------------------+
+       |
+       v
++----------------------------------------------------------------------+
+|  ZERO-CASH ANALYTICAL SOLUTION                                       |
+|                                                                      |
+|  balance(t) = intercept + slope × t                                  |
+|  Set balance = 0:  t_zero = -intercept / slope                       |
+|                  = -447,510 / -43,277                                |
+|                  = 10.34 months from series start                    |
+|                                                                      |
+|  Fractional month → exact calendar day conversion                    |
+|  Predicted zero-cash date:  June 11, 2025                            |
++----------------------------------------------------------------------+
+       |
+       v
+  CHART + TERMINAL SUMMARY
+```
+
+### Model Architecture
+
+The script fits a `LinearRegression` model from scikit-learn on integer month indices (0–5) as the single feature against the end-of-month cash balance as the target. This approach captures the average linear burn trajectory across the full historical window rather than relying on a single month's burn rate, making it more robust to one-off cost spikes.
+
+| Model Parameter | Value |
+|---|---|
+| Algorithm | `sklearn.linear_model.LinearRegression` |
+| Feature | Integer month index (0, 1, 2, …) |
+| Target | Month-end cash balance (USD) |
+| Fitted slope | -$43,277 / month |
+| Fitted intercept | $447,510 |
+| R² score | 0.9942 |
+| Historical window | 6 months (Aug 2024 – Jan 2025) |
+
+The high R² (0.9942) confirms the burn trajectory is highly linear across the historical window, validating the model choice for near-term projection.
+
+### Zero-Cash Date Calculation
+
+The zero-cash crossing is solved analytically rather than by iterating through projected months. Setting the regression line equal to zero:
+
+```
+balance(t) = intercept + slope × t = 0
+
+t_zero = -intercept / slope
+       = -447,510 / -43,277
+       = 10.34 months from series start (Aug 2024)
+```
+
+The fractional part (0.34) is converted to an exact calendar day by multiplying against the actual number of days in the target month, yielding a precise date rather than a rounded month estimate.
+
+**Predicted zero-cash date: June 11, 2025**
+
+### Risk Assessment Framework
+
+The script automatically classifies the remaining runway into one of four risk tiers and prints an actionable recommendation:
+
+| Remaining Runway | Risk Tier | Recommendation |
+|---|---|---|
+| < 3 months | CRITICAL | Raise capital or cut costs immediately |
+| 3 – 6 months | HIGH | Begin fundraising process now |
+| 6 – 12 months | MODERATE | Plan next funding round within 3 months |
+| > 12 months | LOW | Comfortable runway; monitor burn rate |
+
+With **5.34 months of remaining runway**, the current dataset triggers the **HIGH** tier, automatically surfacing an immediate fundraising recommendation in the terminal output.
+
+### Visualization Output
+
+Running the script generates and saves `cash_runway_forecast.png` (300 DPI) to the working directory. The chart contains the following visual layers:
+
+| Element | Style | Description |
+|---|---|---|
+| Historical cash balance | Blue solid line + dot markers | Actual month-end balances (Aug 2024 – Jan 2025) |
+| Projected cash balance | Orange dashed line | Linear regression forecast through zero-cash date |
+| Uncertainty band | Orange shaded region (α=0.12) | ±1 standard deviation of historical residuals |
+| Zero-cash threshold | Red solid horizontal line | $0 baseline — the cash exhaustion floor |
+| Zero-cash intersection | Red star marker | Exact point where projection crosses $0 |
+| Vertical drop line | Red dotted vertical line | Drops from intersection to x-axis for visual clarity |
+| Statistics inset box | Top-right text box | Avg burn rate, remaining runway, zero-cash date |
+| Annotations | Arrows with labels | Starting balance callout; zero-cash date callout |
+
+### Terminal Summary Output
+
+```
+============================================================
+  CASH RUNWAY FORECAST — FINANCIAL SUMMARY
+============================================================
+  Starting Cash Balance          $    500,000.00
+  Current Cash Balance           $    237,600.00  (January 2025)
+  Total Cash Burned (historical) $    262,400.00
+  Historical Period                     6 months
+============================================================
+  Average Monthly Burn Rate      $     43,733.33 / month
+  Model Slope ($/month)          $    -43,277.14
+  Model Intercept                $    447,509.52
+  Model R² Score                          0.9942
+============================================================
+  Remaining Runway                        5.34  months
+  Predicted Zero-Cash Date         June 11, 2025
+============================================================
+  Runway Risk Assessment         HIGH     — Begin fundraising process now.
+============================================================
+```
+
+---
+
 ## How to Run
 
 ### LangGraph Pipeline
@@ -345,9 +496,19 @@ python step2_google_adk.py
 
 Runs the three-agent Google ADK `SequentialAgent` pipeline end-to-end. The `Runner` drives execution through each `LlmAgent` in order, passing the shared session state automatically.
 
+### Cash Runway Forecasting Tool
+
+```bash
+python cash_forecasting.py
+```
+
+Runs the deterministic statistical forecasting pipeline. No API keys or environment variables required. Outputs the terminal financial summary and saves `cash_runway_forecast.png` to the working directory.
+
 ---
 
 ## Expected Terminal Output
+
+### Agent Pipelines (LangGraph & ADK)
 
 Both pipelines produce equivalent structured logs. A clean run looks like this:
 
@@ -399,17 +560,50 @@ Gross margin was 54% and net profit margin was 12%.
 
 If SMTP credentials are not configured, the `[EMAIL SENT SUCCESSFULLY]` block is replaced by the console preview described in the [SMTP Fail-Safe](#smtp-fail-safe) section. All other nodes execute identically.
 
+### Cash Forecasting Tool
+
+```
+[INIT] Building historical financial dataset...
+[INIT] Historical dataset ready — 6 months of data.
+
+  Month-by-Month Summary:
+  Date            Revenue  Total Costs     Net Flow      Balance
+  ------------------------------------------------------------
+  Aug 2024      $   18,000  $    67,000  $   -49,000  $   451,000
+  Sep 2024      $   20,000  $    61,500  $   -41,500  $   409,500
+  Oct 2024      $   22,000  $    80,000  $   -58,000  $   351,500
+  Nov 2024      $   24,000  $    62,200  $   -38,200  $   313,300
+  Dec 2024      $   26,000  $    66,300  $   -40,300  $   273,000
+  Jan 2025      $   28,000  $    63,400  $   -35,400  $   237,600
+
+[MODEL] Fitting LinearRegression on cash balance time series...
+[MODEL] Slope: $-43,277.14/month | Intercept: $447,509.52 | R²: 0.9942
+[MODEL] Solving for zero-cash intersection...
+[MODEL] Zero-cash at month index t=10.3406 → June 11, 2025
+[CHART] Rendering cash runway forecast chart...
+[CHART] Saved to: cash_runway_forecast.png
+
+============================================================
+  CASH RUNWAY FORECAST — FINANCIAL SUMMARY
+============================================================
+  ...
+  Runway Risk Assessment         HIGH     — Begin fundraising process now.
+============================================================
+```
+
 ---
 
 ## Project Structure
 
 ```
 agentic-pipeline/
-├── step1_dynamic_rag.py   # LangGraph pipeline — Steps 1, 2 & 3
-├── step2_google_adk.py    # Google ADK pipeline — equivalent implementation
-├── requirements.txt       # Core Python dependencies
-├── .env_example           # Environment variable template
-├── .env                   # Your local credentials (gitignored)
+├── step1_dynamic_rag.py        # LangGraph pipeline — Steps 1, 2 & 3
+├── step2_google_adk.py         # Google ADK pipeline — equivalent implementation
+├── cash_forecasting.py         # Deterministic cash runway forecasting tool
+├── cash_runway_forecast.png    # Generated chart output (created on first run)
+├── requirements.txt            # Core Python dependencies
+├── .env_example                # Environment variable template
+├── .env                        # Your local credentials (gitignored)
 ├── .gitignore
 └── README.md
 ```
