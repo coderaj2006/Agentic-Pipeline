@@ -1,6 +1,7 @@
 """
-STEP 1 & 2 — LangGraph State, Dynamic RAG Node, Content Agent, Email Agent
-===========================================================================
+STEPS 1, 2 & 3 — LangGraph State, RAG Node, Content Agent, Email Agent,
+                  and StateGraph Orchestration
+=========================================================================
 
 STEP 1 defines:
   - A LangGraph-style State (TypedDict)
@@ -12,6 +13,12 @@ STEP 2 adds:
   - content_agent_node(state) -> dict   (Corporate Communications persona)
   - send_email() SMTP helper with graceful fail-safe console preview
   - email_agent_node(state) -> dict     (Groq-drafted subject + MIME send)
+
+STEP 3 adds:
+  - build_agentic_pipeline() -> CompiledGraph
+      Wires all three nodes into a compiled LangGraph StateGraph:
+      START -> rag_analyst -> corp_communications -> email_dispatcher -> END
+  - __main__ block runs the full end-to-end pipeline via graph.invoke()
 
 Prereqs:
   pip install -r requirements.txt
@@ -125,6 +132,11 @@ def get_groq_llm() -> ChatGroq:
 
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
+
+# LangGraph orchestration — used in Step 3 to compile the StateGraph.
+# StateGraph : the graph builder that accepts our State schema.
+# START / END : sentinel nodes marking the entry and exit of the graph.
+from langgraph.graph import END, START, StateGraph
 
 
 def rag_agent_node(state: State) -> dict:
@@ -559,12 +571,18 @@ def email_agent_node(state: State) -> dict:
 
     # --- 4) Delegate to the SMTP helper ------------------------------------
     # send_email() handles both live sending and the fail-safe preview.
-    # We use a placeholder recipient; in production this would come from state
-    # or a config file (e.g., state.get("recipient_email", "...")).
+    # Recipient is read from RECIPIENT_EMAIL env var if set, otherwise falls
+    # back to SENDER_EMAIL (send-to-self is the safest way to test), and
+    # finally to a placeholder if neither is available.
+    recipient = (
+        os.getenv("RECIPIENT_EMAIL")
+        or os.getenv("SENDER_EMAIL")
+        or "stakeholder@example.com"
+    )
     email_status = send_email(
         subject=email_subject,
         body=email_body,
-        recipient="stakeholder@example.com",
+        recipient=recipient,
     )
 
     # --- 5) Return partial state update ------------------------------------
@@ -572,97 +590,180 @@ def email_agent_node(state: State) -> dict:
 
 
 # ===========================================================================
-# MAIN — ISOLATED TEST EXECUTIONS
+# STEP 3 — LANGGRAPH STATEGRAPH ORCHESTRATION
 # ===========================================================================
-# We test each node independently using a manually constructed mock State.
-# This proves each node works in isolation BEFORE we wire them into a graph.
+# Now that all three agent nodes are verified independently, we wire them
+# into a compiled LangGraph StateGraph — the production-grade execution engine.
 #
-# Test strategy:
-#   - Step 1 test: commented out (preserved for reference).
-#   - Step 2 test: uses a hardcoded mock factual_summary so we don't need
-#     the vector store or a RAG call — content_agent_node and email_agent_node
-#     are tested purely on their own logic.
+# How LangGraph works (quick primer):
+#   - StateGraph(State) creates a directed graph whose nodes share one State.
+#   - add_node(name, fn) registers a callable as a named graph node.
+#   - add_edge(a, b) draws a directed edge: node a always routes to node b.
+#   - START and END are built-in sentinel nodes (not real callables).
+#   - compile() validates the graph topology and returns a runnable object.
+#   - The compiled graph exposes .invoke(initial_state) which:
+#       1. Starts at START, passes initial_state to the first real node.
+#       2. Each node receives the *full* current state and returns a partial
+#          update dict — LangGraph merges it back into the shared state.
+#       3. Execution follows edges until END is reached.
+#       4. Returns the final merged state as a plain dict.
+#
+# Linear topology chosen here:
+#   START
+#     |
+#     v
+#   rag_analyst          (rag_agent_node)       — retrieves + summarizes facts
+#     |
+#     v
+#   corp_communications  (content_agent_node)   — formats into markdown report
+#     |
+#     v
+#   email_dispatcher     (email_agent_node)      — drafts subject + sends email
+#     |
+#     v
+#   END
+# ===========================================================================
+
+def build_agentic_pipeline():
+    """
+    Construct, wire, and compile the three-node agentic StateGraph.
+
+    Node registry
+    -------------
+    "rag_analyst"         -> rag_agent_node
+    "corp_communications" -> content_agent_node
+    "email_dispatcher"    -> email_agent_node
+
+    Edge topology (linear / sequential)
+    ------------------------------------
+    START -> rag_analyst -> corp_communications -> email_dispatcher -> END
+
+    Returns
+    -------
+    CompiledGraph
+        A LangGraph compiled application ready for .invoke() / .stream().
+    """
+
+    # --- Initialise the graph with our shared State schema -----------------
+    # Passing State to StateGraph tells LangGraph the shape of the state dict
+    # that will be threaded through every node. It uses this for type-checking
+    # and for merging partial updates returned by each node.
+    graph = StateGraph(State)
+
+    # --- Register nodes ----------------------------------------------------
+    # add_node(name, callable) — the name is used in add_edge() calls below.
+    # The callable must accept a State-compatible dict and return a dict.
+    graph.add_node("rag_analyst",         rag_agent_node)
+    graph.add_node("corp_communications", content_agent_node)
+    graph.add_node("email_dispatcher",    email_agent_node)
+
+    # --- Define directional edges (routing) --------------------------------
+    # add_edge(source, destination) creates an unconditional directed edge.
+    # For conditional branching you would use add_conditional_edges() instead,
+    # but our pipeline is strictly sequential so plain edges are correct here.
+
+    # Entry point: the graph starts execution at "rag_analyst".
+    graph.add_edge(START,                 "rag_analyst")
+
+    # After RAG produces factual_summary, hand off to the content formatter.
+    graph.add_edge("rag_analyst",         "corp_communications")
+
+    # After the report is polished, hand off to the email dispatcher.
+    graph.add_edge("corp_communications", "email_dispatcher")
+
+    # Terminal edge: after the email node completes, the graph halts.
+    graph.add_edge("email_dispatcher",    END)
+
+    # --- Compile -----------------------------------------------------------
+    # compile() validates the graph (checks for unreachable nodes, missing
+    # edges, etc.) and returns a CompiledGraph — the runnable application.
+    compiled = graph.compile()
+
+    return compiled
+
+
+# ===========================================================================
+# MAIN — FULL END-TO-END PIPELINE (Step 3)
+# ===========================================================================
+# Previous step-by-step isolated tests have been replaced by a single
+# graph.invoke() call that runs all three nodes in sequence automatically.
+#
+# Steps:
+#   1. Warm the vector store (FAISS build happens here, once).
+#   2. Compile the StateGraph via build_agentic_pipeline().
+#   3. Define the initial state with only user_query set.
+#   4. Call graph.invoke() — LangGraph handles node sequencing internally.
+#   5. Print the three key output fields from the final state.
 # ===========================================================================
 
 if __name__ == "__main__":
 
-    # -----------------------------------------------------------------------
-    # STEP 1 TEST (commented out — preserved for reference)
-    # -----------------------------------------------------------------------
-    # Uncomment the block below to re-run the original RAG node test.
-    #
-    # print("Building in-memory vector store...")
-    # _ = get_vectorstore()
-    # print("Vector store ready.\n")
-    # test_state: State = {"user_query": "What was our Q3 revenue?"}
-    # print(f"Query: {test_state['user_query']}")
-    # print("Running rag_agent_node...\n")
-    # update = rag_agent_node(test_state)
-    # print("=== RAG NODE OUTPUT ===")
-    # print(update["factual_summary"])
-
-    # -----------------------------------------------------------------------
-    # STEP 2 TEST — Content Agent + Email Agent (standalone, no RAG needed)
-    # -----------------------------------------------------------------------
-    # We manually inject a factual_summary that mimics what rag_agent_node
-    # would have produced. This isolates Step 2 from Step 1 completely.
-
     print("=" * 65)
-    print("  STEP 2 — ISOLATED NODE TESTS")
+    print("  STEP 3 — LANGGRAPH PIPELINE: END-TO-END EXECUTION")
     print("=" * 65)
 
-    # Mock state: pretend the RAG node already ran and produced this summary.
-    # In the real pipeline, this value would be set by rag_agent_node.
-    mock_state: State = {
-        "factual_summary": (
-            "Q3 profits rose by 15% due to operational cost cutting. "
-            "Gross margin improved to 58%, up from 54% in Q2. "
-            "The East region reduced churn from 3.1% to 2.4% after "
-            "targeted retention campaigns were deployed in August."
+    # --- 1) Warm the vector store ------------------------------------------
+    # Building the FAISS index (embedding all mock docs) happens on first
+    # call. We do it explicitly here so the log message appears before the
+    # graph starts, making the startup sequence easy to follow.
+    print("\n[INIT] Building in-memory FAISS vector store...")
+    _ = get_vectorstore()
+    print("[INIT] Vector store ready.")
+
+    # --- 2) Compile the graph ----------------------------------------------
+    # build_agentic_pipeline() wires the three nodes and calls compile().
+    # The returned object is a fully executable LangGraph application.
+    print("\n[INIT] Compiling LangGraph StateGraph...")
+    pipeline = build_agentic_pipeline()
+    print("[INIT] Graph compiled. Topology: START -> rag_analyst -> "
+          "corp_communications -> email_dispatcher -> END\n")
+
+    # --- 3) Define the initial input state ---------------------------------
+    # Only user_query is set here. The downstream nodes will progressively
+    # fill in factual_summary, polished_content, and email_status as the
+    # graph executes. This mirrors real production usage exactly.
+    initial_state: State = {
+        "user_query": (
+            "What was our performance in Q3 regarding revenue and margins?"
         )
     }
 
-    # -------------------------------------------------------------------
-    # TEST A: content_agent_node
-    # -------------------------------------------------------------------
-    # Pass the mock state into the content agent and capture its output.
-    # Expected: a markdown-formatted business report in polished_content.
-
-    print("\n[TEST A] Running content_agent_node...")
-    print(f"  Input factual_summary:\n  {mock_state['factual_summary']}\n")
-
-    content_update = content_agent_node(mock_state)
-
-    # Merge the partial update into our mock state so the next node can
-    # read polished_content — this is exactly what LangGraph does internally.
-    mock_state.update(content_update)  # type: ignore[arg-type]
-
-    print("\n" + "-" * 65)
-    print("  CONTENT AGENT OUTPUT (polished_content):")
-    print("-" * 65)
-    print(mock_state.get("polished_content", ""))
+    print(f"[INPUT] user_query: {initial_state['user_query']}\n")
     print("-" * 65)
 
-    # -------------------------------------------------------------------
-    # TEST B: email_agent_node
-    # -------------------------------------------------------------------
-    # Pass the updated mock state (now containing polished_content) into
-    # the email agent. It will generate a subject line and attempt to send.
-    # Since SMTP credentials are not set, the fail-safe preview will fire.
+    # --- 4) Execute the compiled graph -------------------------------------
+    # invoke() is the synchronous execution engine. It:
+    #   - Passes initial_state into rag_analyst.
+    #   - Merges the returned {"factual_summary": ...} into the shared state.
+    #   - Passes the updated state into corp_communications.
+    #   - Merges {"polished_content": ...} into the shared state.
+    #   - Passes the updated state into email_dispatcher.
+    #   - Merges {"email_status": ...} into the shared state.
+    #   - Returns the final fully-populated state dict.
+    print("[RUNNING] Invoking pipeline — 3 nodes will execute sequentially...\n")
+    final_state = pipeline.invoke(initial_state)
 
-    print("\n[TEST B] Running email_agent_node...")
-    print("  (SMTP credentials not set → expect console preview below)\n")
+    # --- 5) Print final state summary --------------------------------------
+    print("\n" + "=" * 65)
+    print("  PIPELINE COMPLETE — FINAL STATE SUMMARY")
+    print("=" * 65)
 
-    email_update = email_agent_node(mock_state)
-
-    # Merge the email status back into state.
-    mock_state.update(email_update)  # type: ignore[arg-type]
-
-    print("\n" + "-" * 65)
-    print("  EMAIL AGENT STATUS (email_status):")
+    # Node 1 output: the concise factual answer from the RAG node.
+    print("\n[NODE 1 OUTPUT] factual_summary (rag_analyst):")
     print("-" * 65)
-    print(mock_state.get("email_status", ""))
-    print("-" * 65)
+    print(final_state.get("factual_summary", "N/A"))
 
-    print("\n[OK] Step 2 isolated tests complete.")
-    print("     Next: wire all three nodes into a LangGraph StateGraph (Step 3).")
+    # Node 2 output: the full markdown business report.
+    print("\n[NODE 2 OUTPUT] polished_content (corp_communications):")
+    print("-" * 65)
+    print(final_state.get("polished_content", "N/A"))
+
+    # Node 3 output: the email send status or mock-trace string.
+    print("\n[NODE 3 OUTPUT] email_status (email_dispatcher):")
+    print("-" * 65)
+    print(final_state.get("email_status", "N/A"))
+
+    print("\n" + "=" * 65)
+    print("  [OK] LangGraph pipeline execution complete.")
+    print("=" * 65)
+
