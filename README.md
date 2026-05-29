@@ -1,12 +1,15 @@
 # Stateful Multi-Agent RAG & Automation Pipeline
 
-An automated, sequential multi-agent pipeline that accepts a natural language business query, retrieves relevant facts from an internal knowledge base, generates a polished executive report, and delivers it via email — all orchestrated by a compiled **LangGraph StateGraph**.
+A production-grade, stateful multi-agent automation pipeline implemented across two distinct orchestration paradigms — **LangGraph** and **Google ADK**. The system accepts a natural language business query, retrieves grounded facts from an internal knowledge base, generates a polished executive report, and delivers it via email — all driven by a sequential three-agent architecture.
+
+Both implementations share identical underlying utilities (FAISS vector store, Groq LLM calls, SMTP helper) and produce the same output. The repository serves as a direct, side-by-side comparison of how LangGraph and Google ADK approach the same multi-agent problem.
 
 ---
 
 ## Table of Contents
 
-- [Architectural Overview](#architectural-overview)
+- [System Architecture & Data Flow](#system-architecture--data-flow)
+- [Comparative Framework Breakdown](#comparative-framework-breakdown)
 - [Tech Stack](#tech-stack)
 - [Prerequisites & Installation](#prerequisites--installation)
 - [Environment Configuration](#environment-configuration)
@@ -16,99 +19,173 @@ An automated, sequential multi-agent pipeline that accepts a natural language bu
 
 ---
 
-## Architectural Overview
+## System Architecture & Data Flow
 
-The pipeline is built as three sequential agent nodes wired together by a LangGraph `StateGraph`. A single `State` TypedDict is threaded through every node — each node reads what it needs and writes back only its own output field. LangGraph merges these partial updates automatically, so no node needs to know about the internals of any other.
+A single user query enters the pipeline and flows linearly through three specialized agent roles. Each agent reads from the shared state, performs its task, and writes its output back — which the next agent consumes automatically.
 
 ```
-START
-  |
-  v
-[ rag_analyst ]          — Node 1: Retrieval-Augmented Generation
-  |
-  v
-[ corp_communications ]  — Node 2: Markdown Report Generation
-  |
-  v
-[ email_dispatcher ]     — Node 3: Subject Line Generation + Email Send
-  |
-  v
-END
+  USER QUERY
+  "What was our performance in Q3 regarding revenue and margins?"
+       |
+       v
++----------------------------------------------------------------------+
+|  NODE 1 — RAG ANALYST                                               |
+|                                                                      |
+|  - Embeds the query using sentence-transformers/all-MiniLM-L6-v2    |
+|  - Runs FAISS similarity search over the company knowledge base      |
+|  - Retrieves top-3 most relevant document chunks                     |
+|  - Passes context + question to Groq llama-3.3-70b-versatile        |
+|  - Produces a concise 1-2 sentence factual answer                   |
+|                                                                      |
+|  Output -> factual_summary                                           |
++----------------------------------------------------------------------+
+       |
+       v
++----------------------------------------------------------------------+
+|  NODE 2 — CORPORATE COMMUNICATIONS SPECIALIST                       |
+|                                                                      |
+|  - Reads factual_summary from shared state                           |
+|  - Applies a locked Senior Corporate Communications persona          |
+|  - Invokes Groq llama-3.3-70b-versatile (temperature=0.4)           |
+|  - Formats raw facts into a structured markdown business report:     |
+|      ## Executive Summary                                            |
+|      ## Key Metrics                                                  |
+|      ## Key Takeaways                                                |
+|      ## Outlook                                                      |
+|                                                                      |
+|  Output -> polished_content                                          |
++----------------------------------------------------------------------+
+       |
+       v
++----------------------------------------------------------------------+
+|  NODE 3 — EMAIL DISPATCHER                                          |
+|                                                                      |
+|  - Reads polished_content from shared state                          |
+|  - Calls Groq llama-3.1-8b-instant to draft a subject line          |
+|    (under 60 chars, specific to report content)                      |
+|  - Builds a MIMEMultipart email with header + report + footer        |
+|  - Performs full STARTTLS handshake via smtplib                      |
+|  - Delivers to configured recipient, or prints console preview       |
+|    if SMTP credentials are absent (fail-safe — never crashes)        |
+|                                                                      |
+|  Output -> email_status                                              |
++----------------------------------------------------------------------+
+       |
+       v
+  STAKEHOLDER INBOX
 ```
 
-### Shared State
+### Shared State Fields
+
+| Field | Written By | Read By |
+|---|---|---|
+| `user_query` | Entry point | Node 1 |
+| `factual_summary` | Node 1 (RAG Analyst) | Node 2 |
+| `polished_content` | Node 2 (Corp Comms) | Node 3 |
+| `email_status` | Node 3 (Email Dispatcher) | Final output |
+
+---
+
+## Comparative Framework Breakdown
+
+Both scripts implement the identical pipeline. The difference is entirely in how the orchestration layer is expressed.
+
+### LangGraph — `step1_dynamic_rag.py`
+
+LangGraph uses an **explicit graph-state model**. You define a `TypedDict` schema that describes every field the pipeline will ever touch, register each agent function as a named node, and draw directional edges between them manually.
 
 ```python
+# State schema — every field declared upfront
 class State(TypedDict, total=False):
-    user_query:       str   # Set at entry — the raw question from the user
-    factual_summary:  str   # Written by Node 1, read by Node 2
-    polished_content: str   # Written by Node 2, read by Node 3
-    email_status:     str   # Written by Node 3 — final delivery trace
+    user_query:       str
+    factual_summary:  str
+    polished_content: str
+    email_status:     str
+
+# Graph construction
+graph = StateGraph(State)
+graph.add_node("rag_analyst",         rag_agent_node)
+graph.add_node("corp_communications", content_agent_node)
+graph.add_node("email_dispatcher",    email_agent_node)
+
+graph.add_edge(START,                 "rag_analyst")
+graph.add_edge("rag_analyst",         "corp_communications")
+graph.add_edge("corp_communications", "email_dispatcher")
+graph.add_edge("email_dispatcher",    END)
+
+pipeline = graph.compile()
+final_state = pipeline.invoke({"user_query": "..."})
 ```
 
-`total=False` makes every key optional, allowing the pipeline to be built and tested incrementally.
+Each node function returns a partial dict (`{"factual_summary": "..."}`) and LangGraph merges it into the shared state automatically. The topology is fully explicit — you can see every edge in the code.
+
+**Best for:** Pipelines that need conditional branching, parallel fan-out, human-in-the-loop checkpoints, or fine-grained control over routing logic.
 
 ---
 
-### Node 1 — RAG Analyst (`rag_analyst`)
+### Google ADK — `step2_google_adk.py`
 
-**Function:** `rag_agent_node(state) -> dict`
+Google ADK uses a **declarative, code-first model**. Each agent is an `LlmAgent` instance with a name, model, instruction, and optional tools. State hand-off between agents is handled by `output_key` (write) and `{placeholder}` injection in instruction strings (read) — no manual edge definitions required.
 
-1. Reads `user_query` from state.
-2. Runs a similarity search against an in-memory **FAISS** vector store populated with mock company knowledge (financials, operational rules, regional metrics).
-3. Retrieves the top-3 most relevant document chunks.
-4. Passes the retrieved context and the original question into a `ChatPromptTemplate` with a strict *"use only the provided context"* analyst persona.
-5. Invokes **ChatGroq** (`llama-3.3-70b-versatile`, `temperature=0`) for a deterministic, factual 1–2 sentence answer.
-6. Returns `{"factual_summary": "..."}`.
+```python
+# Agent 1 writes to session state key "factual_summary"
+rag_analyst_agent = LlmAgent(
+    name="rag_analyst",
+    model=LiteLlm(model="groq/llama-3.3-70b-versatile"),
+    instruction="Call retrieve_and_summarize with the user's question.",
+    tools=[retrieve_and_summarize],
+    output_key="factual_summary",
+)
 
-**Embeddings:** `sentence-transformers/all-MiniLM-L6-v2` via `langchain-huggingface` — runs fully locally, no API key required.
+# Agent 2 reads {factual_summary} injected into its instruction at runtime
+corp_communications_agent = LlmAgent(
+    name="corp_communications",
+    model=LiteLlm(model="groq/llama-3.3-70b-versatile"),
+    instruction="Format these facts into a report:\n\n{factual_summary}",
+    output_key="polished_content",
+)
+
+# SequentialAgent wires them in order — no edges needed
+pipeline = SequentialAgent(
+    name="agentic_pipeline",
+    sub_agents=[rag_analyst_agent, corp_communications_agent, email_dispatcher_agent],
+)
+```
+
+The `SequentialAgent` passes the same `InvocationContext` (containing session state) to each sub-agent in order. No `add_edge()` calls, no state-merging dicts.
+
+**Best for:** Pipelines with a fixed linear sequence where you want minimal boilerplate and native ADK tooling (tracing, evaluation, deployment to Vertex AI Agent Engine).
 
 ---
 
-### Node 2 — Corporate Communications (`corp_communications`)
+### Side-by-Side Comparison
 
-**Function:** `content_agent_node(state) -> dict`
-
-1. Reads `factual_summary` from state.
-2. Applies a locked **Senior Corporate Communications Specialist** persona via a `ChatPromptTemplate` system message with five explicit rules (no hallucination, markdown structure, formal tone, required sections, bold numbers).
-3. Invokes **ChatGroq** (`llama-3.3-70b-versatile`, `temperature=0.4`) — slightly warmer than Node 1 for natural-sounding prose.
-4. Produces a structured markdown report with four mandatory sections:
-   - `## Executive Summary`
-   - `## Key Metrics`
-   - `## Key Takeaways`
-   - `## Outlook`
-5. Returns `{"polished_content": "..."}`.
-
----
-
-### Node 3 — Email Dispatcher (`email_dispatcher`)
-
-**Function:** `email_agent_node(state) -> dict`
-
-1. Reads `polished_content` from state.
-2. Makes a fast **ChatGroq** call (`llama-3.1-8b-instant`, `temperature=0.7`) to dynamically generate a specific, under-60-character email subject line from the report content.
-3. Builds a `MIMEMultipart("alternative")` email body with a pipeline header, the full markdown report, and a footer.
-4. Delegates to the `send_email()` SMTP helper, which:
-   - Opens a TCP connection to the configured SMTP server.
-   - Performs the full STARTTLS handshake (`ehlo` → `starttls` → `ehlo` → `login` → `sendmail`).
-   - Falls back to a rich **console preview block** if credentials are missing or the connection fails — the pipeline never crashes.
-5. Returns `{"email_status": "..."}` with either a success confirmation or a mock-trace string.
-
-**Recipient resolution order:** `RECIPIENT_EMAIL` env var → `SENDER_EMAIL` env var → `stakeholder@example.com` placeholder.
+| Aspect | LangGraph | Google ADK |
+|---|---|---|
+| State definition | Explicit `TypedDict` schema | Session state dict (implicit) |
+| Routing | Manual `add_edge()` calls | `SequentialAgent` sub_agents list |
+| State hand-off | Node returns partial dict; LangGraph merges | `output_key` writes; `{placeholder}` reads |
+| Tool attachment | Plain Python functions passed to node | `tools=[]` on `LlmAgent` |
+| Model support | Any LangChain-compatible model | Gemini native; others via `LiteLlm` wrapper |
+| Conditional branching | `add_conditional_edges()` | `LoopAgent` / custom `BaseAgent` |
+| Entry point | `graph.invoke(initial_state)` | `runner.run_async(new_message)` |
+| Script | `step1_dynamic_rag.py` | `step2_google_adk.py` |
 
 ---
 
 ## Tech Stack
 
-| Layer | Library / Service |
-|---|---|
-| Orchestration | `langgraph` — `StateGraph`, `START`, `END` |
-| LLM Inference | `langchain-groq` — ChatGroq (`llama-3.3-70b-versatile`, `llama-3.1-8b-instant`) |
-| Embeddings | `langchain-huggingface` + `sentence-transformers` (`all-MiniLM-L6-v2`) |
-| Vector Store | `faiss-cpu` — in-memory, no persistence |
-| Prompt / Chain | `langchain-core` — `ChatPromptTemplate`, pipe operator (`|`) |
-| Email | Python stdlib — `smtplib`, `email.mime` |
-| Config | `python-dotenv` |
+| Layer | LangGraph Pipeline | Google ADK Pipeline |
+|---|---|---|
+| Orchestration | `langgraph` — `StateGraph`, `START`, `END` | `google-adk` — `LlmAgent`, `SequentialAgent` |
+| LLM Inference | `langchain-groq` — ChatGroq | `google-adk` + `litellm` — `LiteLlm(model="groq/...")` |
+| RAG Model | `llama-3.3-70b-versatile` (temp=0) | `llama-3.3-70b-versatile` (temp=0) |
+| Content Model | `llama-3.3-70b-versatile` (temp=0.4) | `llama-3.3-70b-versatile` (temp=0.4) |
+| Subject Line Model | `llama-3.1-8b-instant` (temp=0.7) | `llama-3.3-70b-versatile` (temp=0.7) |
+| Embeddings | `sentence-transformers/all-MiniLM-L6-v2` | same |
+| Vector Store | `faiss-cpu` — in-memory, no persistence | same |
+| Email | Python stdlib — `smtplib`, `email.mime` | same |
+| Config | `python-dotenv` | same |
 
 ---
 
@@ -130,11 +207,37 @@ venv\Scripts\activate
 # macOS / Linux
 source venv/bin/activate
 
-# 3. Install all dependencies
+# 3. Install core dependencies (required for both pipelines)
 pip install -r requirements.txt
+
+# 4. Install additional dependencies for the Google ADK pipeline only
+pip install google-adk litellm
 ```
 
-> On first run, `sentence-transformers` will download the `all-MiniLM-L6-v2` model (~90 MB) and cache it locally. Subsequent runs use the cache.
+### Full dependency list
+
+```
+# Core LangChain stack (both pipelines)
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-community>=0.3.0
+langchain-groq>=0.2.0,<1.0.0
+langchain-huggingface>=0.2.0
+sentence-transformers>=3.0.0
+faiss-cpu>=1.8.0
+python-dotenv>=1.0.0
+
+# LangGraph (step1_dynamic_rag.py)
+langgraph
+
+# Google ADK pipeline (step2_google_adk.py)
+google-adk
+litellm
+```
+
+> On first run, `sentence-transformers` downloads `all-MiniLM-L6-v2` (~90 MB) and caches it locally. Subsequent runs use the cache.
+
+> **Windows note:** LiteLLM may raise `UnicodeDecodeError` on Windows. The ADK script sets `PYTHONUTF8=1` automatically to prevent this.
 
 ---
 
@@ -150,22 +253,30 @@ cp .env_example .env
 # ===========================================================================
 # GROQ API CONFIGURATION
 # ===========================================================================
-# Required for ChatGroq inference used in all agent nodes.
+# Required for all LLM inference across both pipelines.
 GROQ_API_KEY=your_groq_api_key_here
 
 # ===========================================================================
-# SMTP EMAIL CONFIGURATION
+# GROQ API KEY ROTATION (Google ADK pipeline only — optional)
 # ===========================================================================
-# Required for live email sending via send_email().
-# If these are left blank or missing, the script's fail-safe will trigger
-# and safely print a mock email preview to your console.
+# The ADK pipeline supports automatic key rotation on rate-limit (429) errors.
+# Add up to 8 additional keys. The rotator cycles through them in order.
+# GROQ_API_KEY_2=your_second_key_here
+# GROQ_API_KEY_3=your_third_key_here
+
+# ===========================================================================
+# SMTP EMAIL CONFIGURATION (both pipelines)
+# ===========================================================================
+# Required for live email delivery. If any value is missing or the connection
+# fails, the SMTP fail-safe activates automatically — see section below.
 
 SMTP_SERVER=smtp.gmail.com
 SMTP_PORT=587
 SENDER_EMAIL=reports@yourcompany.com
-SENDER_PASSWORD=your_secure_app_password
+SENDER_PASSWORD=your_app_password_here
 
-# Optional: who to send the report to. Defaults to SENDER_EMAIL if not set.
+# Optional: override the recipient address.
+# Defaults to SENDER_EMAIL (send-to-self) if not set.
 # RECIPIENT_EMAIL=stakeholder@yourcompany.com
 ```
 
@@ -173,16 +284,17 @@ SENDER_PASSWORD=your_secure_app_password
 
 | Variable | Required | Description |
 |---|---|---|
-| `GROQ_API_KEY` | **Yes** | API key from [console.groq.com](https://console.groq.com). Used by all three LLM calls. |
-| `SMTP_SERVER` | No | Outgoing mail server hostname (e.g. `smtp.gmail.com`). |
-| `SMTP_PORT` | No | SMTP port — defaults to `587` (STARTTLS). |
-| `SENDER_EMAIL` | No | The From address. Also used as the default recipient. |
-| `SENDER_PASSWORD` | No | App password for `SENDER_EMAIL`. For Gmail, generate one at [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords) with 2FA enabled. |
-| `RECIPIENT_EMAIL` | No | Override the To address. Falls back to `SENDER_EMAIL` if unset. |
+| `GROQ_API_KEY` | **Yes** | Primary Groq API key from [console.groq.com](https://console.groq.com) |
+| `GROQ_API_KEY_2` … `_9` | No | Additional keys for rate-limit rotation (ADK pipeline) |
+| `SMTP_SERVER` | No | Outgoing mail server (e.g. `smtp.gmail.com`) |
+| `SMTP_PORT` | No | SMTP port — defaults to `587` (STARTTLS) |
+| `SENDER_EMAIL` | No | From address; also used as default recipient |
+| `SENDER_PASSWORD` | No | App password — for Gmail, generate at [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords) with 2FA enabled |
+| `RECIPIENT_EMAIL` | No | Override the To address; falls back to `SENDER_EMAIL` |
 
 ### SMTP Fail-Safe
 
-If any SMTP credential is missing or the connection fails for any reason, the pipeline does **not** crash. Instead, `send_email()` catches the exception and prints a formatted console preview showing exactly what would have been sent:
+Both pipelines include a robust `send_email()` utility that wraps the entire SMTP handshake in a `try/except`. If credentials are missing, the server is unreachable, or authentication fails for any reason, the function catches the exception and prints a formatted console preview instead of crashing:
 
 ```
 +==============================================================+
@@ -191,75 +303,101 @@ If any SMTP credential is missing or the connection fails for any reason, the pi
   REASON  : SMTP unavailable - ValueError
   To      : stakeholder@example.com
   From    : noreply@pipeline.local
-  Subject : Q3 Results: 15% Profit Boost and Improved Gross Margin
+  Subject : Q3 Results: $12.4M Revenue, 8% Growth
 +--------------------------------------------------------------+
   BODY PREVIEW:
-    ...
+    This report was generated automatically by the Agentic Pipeline.
+    ...full report body...
 +==============================================================+
 ```
 
-This makes the pipeline safe to run in any environment — local dev, CI, or staging — without live email credentials.
+The pipeline continues to completion and `email_status` is populated with a mock-trace string. This makes both scripts safe to run in any environment — local dev, CI, or staging — without live SMTP credentials.
+
+### Groq API Key Rotation (ADK pipeline)
+
+The ADK pipeline (`step2_google_adk.py`) includes a `_GroqKeyRotator` class that manages multiple Groq keys. On any `429 rate_limit_exceeded` response, it automatically rotates `os.environ["GROQ_API_KEY"]` to the next available key and retries — no manual intervention needed.
+
+```
+[INIT] Groq key rotation: 3 key(s) loaded.
+...
+[RATE LIMIT] Waiting 7s then retrying with key #2 (attempt 1/3)...
+```
+
+To enable rotation, uncomment and populate `GROQ_API_KEY_2`, `GROQ_API_KEY_3`, etc. in `.env`.
 
 ---
 
 ## How to Run
 
+### LangGraph Pipeline
+
 ```bash
 python step1_dynamic_rag.py
 ```
+
+Runs the three-node LangGraph `StateGraph` pipeline end-to-end. The compiled graph drives execution from `START` through `rag_analyst` → `corp_communications` → `email_dispatcher` → `END`.
+
+### Google ADK Pipeline
+
+```bash
+python step2_google_adk.py
+```
+
+Runs the three-agent Google ADK `SequentialAgent` pipeline end-to-end. The `Runner` drives execution through each `LlmAgent` in order, passing the shared session state automatically.
 
 ---
 
 ## Expected Terminal Output
 
-A successful end-to-end run produces logs in five phases:
+Both pipelines produce equivalent structured logs. A clean run looks like this:
 
 ```
 =================================================================
-  STEP 3 — LANGGRAPH PIPELINE: END-TO-END EXECUTION
+  PIPELINE — END-TO-END EXECUTION
 =================================================================
 
 [INIT] Building in-memory FAISS vector store...
 [INIT] Vector store ready.
-
-[INIT] Compiling LangGraph StateGraph...
-[INIT] Graph compiled. Topology: START -> rag_analyst -> corp_communications -> email_dispatcher -> END
+[INIT] Graph compiled. Topology:
+       START -> rag_analyst -> corp_communications -> email_dispatcher -> END
 
 [INPUT] user_query: What was our performance in Q3 regarding revenue and margins?
 
 -----------------------------------------------------------------
-[RUNNING] Invoking pipeline — 3 nodes will execute sequentially...
-
-[EMAIL SENT SUCCESSFULLY]
-  To      : your@email.com
-  From    : your@email.com
-  Subject : Q3 Performance Exceeds Expectations: $12.4M in Revenue Growth
-  Server  : smtp.gmail.com:587
-
-=================================================================
-  PIPELINE COMPLETE — FINAL STATE SUMMARY
-=================================================================
+[RUNNING] Invoking pipeline...
 
 [NODE 1 OUTPUT] factual_summary (rag_analyst):
 -----------------------------------------------------------------
-In Q3, our revenue was $12.4M, representing an 8% increase quarter-over-quarter.
-Our Q3 gross margin was 54% and net profit margin was 12%.
+In Q3, revenue was $12.4M, an 8% increase quarter-over-quarter.
+Gross margin was 54% and net profit margin was 12%.
 
 [NODE 2 OUTPUT] polished_content (corp_communications):
 -----------------------------------------------------------------
 ## Executive Summary
 ...
 
+## Key Metrics
+* Revenue: **$12.4M**
+* Quarter-over-quarter increase: **8%**
+* Gross margin: **54%**
+* Net profit margin: **12%**
+...
+
+[EMAIL SENT SUCCESSFULLY]
+  To      : your@email.com
+  Subject : Q3 Results: $12.4M Revenue, 8% Growth
+  Server  : smtp.gmail.com:587
+
 [NODE 3 OUTPUT] email_status (email_dispatcher):
 -----------------------------------------------------------------
 [EMAIL SENT SUCCESSFULLY] ...
 
 =================================================================
-  [OK] LangGraph pipeline execution complete.
+  [OK] Pipeline execution complete.
 =================================================================
 ```
 
-If SMTP credentials are not configured, the `[EMAIL SENT SUCCESSFULLY]` block is replaced by the console preview described in the [SMTP Fail-Safe](#smtp-fail-safe) section above. All other nodes execute identically.
+If SMTP credentials are not configured, the `[EMAIL SENT SUCCESSFULLY]` block is replaced by the console preview described in the [SMTP Fail-Safe](#smtp-fail-safe) section. All other nodes execute identically.
 
 ---
 
@@ -267,8 +405,9 @@ If SMTP credentials are not configured, the `[EMAIL SENT SUCCESSFULLY]` block is
 
 ```
 agentic-pipeline/
-├── step1_dynamic_rag.py   # Full pipeline — Steps 1, 2 & 3
-├── requirements.txt       # Pinned Python dependencies
+├── step1_dynamic_rag.py   # LangGraph pipeline — Steps 1, 2 & 3
+├── step2_google_adk.py    # Google ADK pipeline — equivalent implementation
+├── requirements.txt       # Core Python dependencies
 ├── .env_example           # Environment variable template
 ├── .env                   # Your local credentials (gitignored)
 ├── .gitignore
